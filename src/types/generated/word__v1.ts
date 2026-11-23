@@ -1,3 +1,3 @@
 import { z } from "zod"
 
-export const wordV1Schema = z.object({ "text": z.string().describe("Surface form of the word."), "speaker": z.union([z.string(), z.null()]).describe("Optional speaker identifier.").default(null) }).strict().describe("A single word annotation.\n\nThe ``text`` is the surface form as it appears in the source media.")
+export const wordV1Schema = z.object({ "text": z.string().describe("Surface form of the word."), "speaker": z.union([z.string(), z.null()]).describe("Optional speaker identifier.").default(null), "line_index": z.union([z.number().int().gte(0), z.null()]).describe("Index of the line (lyric, subtitle cue) holding the word.").default(null), "confidence": z.union([z.number().gte(0).lte(1), z.null()]).describe("Recognizer or aligner confidence in [0, 1].").default(null) }).strict().describe("A single word annotation.\n\nThe ``text`` is the surface form as it appears in the source media.")
