@@ -1,14 +1,14 @@
 // Selection actions: commands whose input is the multi-selection (uiStore.picked). Each is one
 // step and one Undo for the whole selection (src/lib/undo.ts), and none needs a confirm, because
 // each can be taken back exactly: deleted annotations are re-created with the same ids, and moved
-// or nudged ones get their old tier or interval back.
+// ones get their old tier back. (Nudging a selection in time waits for the server to accept
+// `reference` in an annotation patch: reeleehq/lacing issue on AnnotationPatch.)
 //
 // Shaped as the fleet's selection commands (i2mint/acture#86): the selection is the input, the
 // undo policy is undo-toast's advice.
 
 import type { Annotation } from '@/domain/envelope';
-import { fromMicros, intervalToMicros } from '@/domain/time';
-import { plural, recreate, restoreFields, undoable } from '@/lib/undo';
+import { deleteAnnotations, plural, restoreFields, undoLast, undoable } from '@/lib/undo';
 import { annotationsProvider } from '@/store/factories';
 import { useUiStore } from '@/stores/ui';
 import { defineCommand } from 'command-wrapex';
@@ -30,6 +30,19 @@ async function pickedRecords(): Promise<Annotation[]> {
 
 const nothingPicked = { success: false, message: 'Nothing selected.' } as const;
 
+/** Delete the picked annotations (lift: the others do not move), with one Undo. */
+export async function deletePicked(): Promise<{ success: boolean; message?: string }> {
+  const records = await pickedRecords();
+  if (!records.length) return nothingPicked;
+  useUiStore.getState().clearPicked();
+  const out = await deleteAnnotations(
+    records,
+    (n) => `${plural(n, 'annotation', 'annotations')} deleted`,
+    records.length === 1 ? 'remove-item' : 'bulk-delete',
+  );
+  return { success: out.ok, message: out.error };
+}
+
 export const deletePickedCmd = defineCommand({
   id: 'lacing.selection.delete',
   label: 'Delete selected annotations',
@@ -37,26 +50,7 @@ export const deletePickedCmd = defineCommand({
   description:
     'Delete every selected annotation (lift: other annotations do not move). One Undo brings them all back.',
   when: 'picked.length > 0',
-  execute: async () => {
-    const records = await pickedRecords();
-    if (!records.length) return nothingPicked;
-    const ok = await undoable({
-      context: records.length === 1 ? 'remove-item' : 'bulk-delete',
-      extra: { count: records.length, reversal: 'compensating' },
-      run: async () => {
-        const done: Annotation[] = [];
-        for (const r of records) {
-          await annotationsProvider.delete(r.id);
-          done.push(r);
-        }
-        useUiStore.getState().clearPicked();
-        return done;
-      },
-      undo: (done) => recreate(done),
-      message: (done) => `${plural(done.length, 'annotation', 'annotations')} deleted`,
-    });
-    return { success: ok };
-  },
+  execute: () => deletePicked(),
 });
 
 export const movePickedToTierCmd = defineCommand({
@@ -69,60 +63,21 @@ export const movePickedToTierCmd = defineCommand({
     const records = (await pickedRecords()).filter((r) => r.tier !== tier);
     if (!records.length)
       return { success: false, message: `All selected annotations are already on ${tier}.` };
-    const ok = await undoable({
+    const out = await undoable<{ id: string; patch: Partial<Annotation> }[]>({
       context: { reversal: 'compensating', cost: 'low' },
       extra: { count: records.length },
-      run: async () => {
-        for (const r of records) await annotationsProvider.update(r.id, { tier });
-        return records.map((r) => ({ id: r.id, patch: { tier: r.tier } }));
+      start: () => [],
+      run: async (before) => {
+        for (const r of records) {
+          await annotationsProvider.update(r.id, { tier });
+          before.push({ id: r.id, patch: { tier: r.tier } });
+        }
       },
+      isEmpty: (before) => before.length === 0,
       undo: (before) => restoreFields(before),
       message: (before) => `${plural(before.length, 'annotation', 'annotations')} moved to ${tier}`,
     });
-    return { success: ok };
-  },
-});
-
-export const nudgePickedCmd = defineCommand({
-  id: 'lacing.selection.nudge',
-  label: 'Nudge selected annotations',
-  category: 'Selection',
-  description:
-    'Shift every selected annotation earlier or later by the same amount (milliseconds; never before 0).',
-  schema: z.object({ ms: z.number().int() }),
-  when: 'picked.length > 0',
-  execute: async ({ ms }) => {
-    const timed = (await pickedRecords()).flatMap((r) => (r.reference.interval ? [{ r, i: r.reference.interval }] : []));
-    if (!timed.length) return nothingPicked;
-    const records = timed.map((t) => t.r);
-    // The whole selection moves together: an earlier nudge stops where the earliest one reaches 0.
-    const starts = timed.map((t) => intervalToMicros(t.i).start);
-    const delta = Math.max(ms * 1000, -Math.min(...starts));
-    if (delta === 0) return { success: false, message: 'Already at the start.' };
-    const ok = await undoable({
-      context: { reversal: 'compensating', cost: 'low' },
-      extra: { count: records.length },
-      run: async () => {
-        for (const { r, i } of timed) {
-          const { start, end } = intervalToMicros(i);
-          const rate = i.start.r;
-          await annotationsProvider.update(r.id, {
-            reference: {
-              ...r.reference,
-              interval: {
-                start: fromMicros(start + delta, rate),
-                end: fromMicros(end + delta, rate),
-              },
-            },
-          });
-        }
-        return records.map((r) => ({ id: r.id, patch: { reference: r.reference } }));
-      },
-      undo: (before) => restoreFields(before),
-      message: (before) =>
-        `${plural(before.length, 'annotation', 'annotations')} moved ${delta > 0 ? 'later' : 'earlier'} by ${Math.abs(delta) / 1000} ms`,
-    });
-    return { success: ok };
+    return { success: out.ok, message: out.error };
   },
 });
 
@@ -137,4 +92,18 @@ export const clearPickedCmd = defineCommand({
   },
 });
 
-export const bulkCommands = [deletePickedCmd, movePickedToTierCmd, nudgePickedCmd, clearPickedCmd];
+export const undoLastCmd = defineCommand({
+  id: 'lacing.history.undo',
+  label: 'Undo last edit',
+  category: 'History',
+  description:
+    'Take back the latest delete or bulk edit still open, even after its Undo toast has gone.',
+  execute: async () => {
+    const what = await undoLast();
+    return what
+      ? { success: true, message: `Undone: ${what}` }
+      : { success: false, message: 'Nothing to undo.' };
+  },
+});
+
+export const bulkCommands = [deletePickedCmd, movePickedToTierCmd, clearPickedCmd, undoLastCmd];

@@ -8,8 +8,6 @@ import { useUiStore } from '@/stores/ui';
 import { useState } from 'react';
 import { Button } from './button';
 
-const NUDGE_MS = 100;
-
 export function SelectionBar({ tiers }: { tiers: Tier[] }) {
   const picked = useUiStore((s) => s.picked);
   const [tier, setTier] = useState('');
@@ -51,24 +49,6 @@ export function SelectionBar({ tiers }: { tiers: Tier[] }) {
         onClick={() => void run('lacing.selection.moveToTier', { tier })}
       >
         Move
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={busy}
-        aria-label={`Nudge ${NUDGE_MS} ms earlier`}
-        onClick={() => void run('lacing.selection.nudge', { ms: -NUDGE_MS })}
-      >
-        −{NUDGE_MS} ms
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={busy}
-        aria-label={`Nudge ${NUDGE_MS} ms later`}
-        onClick={() => void run('lacing.selection.nudge', { ms: NUDGE_MS })}
-      >
-        +{NUDGE_MS} ms
       </Button>
       <Button
         size="sm"

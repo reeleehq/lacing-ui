@@ -10,9 +10,11 @@ import { fromMicros, intervalToMicros } from '@/domain/time';
 import { recreate, restoreFields, undoable } from '@/lib/undo';
 import { annotationsProvider } from '@/store/factories';
 import { useTransportStore } from '@/stores/transport';
+import { useUiStore } from '@/stores/ui';
 import { defineCommand } from 'command-wrapex';
 import { z } from 'zod';
 import { deleteWithUndo } from './annotations';
+import { deletePicked } from './bulk';
 
 // --- helpers --------------------------------------------------------------
 
@@ -85,8 +87,10 @@ export const liftCmd = defineCommand({
   keybinding: { key: 'Delete' },
   when: 'selection.kind === "annotation"',
   execute: async ({ id }) => {
-    const ok = await deleteWithUndo(id, 'Annotation lifted');
-    return { success: ok, message: ok ? `Lifted ${id}` : undefined };
+    // With several annotations picked, Delete acts on the picked ones (what the user sees selected).
+    if (useUiStore.getState().picked.length > 0) return deletePicked();
+    const out = await deleteWithUndo(id, 'Annotation lifted');
+    return { success: out.ok, message: out.ok ? `Lifted ${id}` : out.error };
   },
 });
 
@@ -109,12 +113,17 @@ export const rippleCmd = defineCommand({
     const duration = end - start;
 
     // Delete first, then shift later siblings on the same tier. One Undo re-creates the
-    // annotation and puts every shifted sibling back where it was.
-    let shifted = 0;
-    const ok = await undoable({
+    // annotation and puts every shifted sibling back; if a shift fails part-way, what was
+    // done is still offered for Undo.
+    const out = await undoable<{
+      deleted: Annotation[];
+      before: { id: string; patch: Partial<Annotation> }[];
+    }>({
       context: 'remove-item',
-      run: async () => {
+      start: () => ({ deleted: [], before: [] }),
+      run: async (done) => {
         await annotationsProvider.delete(id);
+        done.deleted.push(ann);
         const all = await annotationsProvider.getList({});
         const toShift = all.data.filter((a) => {
           if (a.id === id) return false;
@@ -123,18 +132,16 @@ export const rippleCmd = defineCommand({
           if (!ai) return false;
           return intervalToMicros(ai).start >= end;
         });
-        const before: { id: string; patch: Partial<Annotation> }[] = [];
         for (const a of toShift) {
           const ai = a.reference.interval;
           if (!ai) continue;
           const { start: s, end: e } = intervalToMicros(ai);
           const newRef = withInterval(a, s - duration, e - duration);
           await annotationsProvider.update(a.id, { reference: newRef });
-          before.push({ id: a.id, patch: { reference: a.reference } });
+          done.before.push({ id: a.id, patch: { reference: a.reference } });
         }
-        shifted = before.length;
-        return { deleted: [ann], before };
       },
+      isEmpty: (done) => done.deleted.length === 0,
       undo: async ({ deleted, before }) => {
         await restoreFields(before);
         await recreate(deleted);
@@ -143,8 +150,8 @@ export const rippleCmd = defineCommand({
         `Ripple delete: ${before.length} later annotation${before.length === 1 ? '' : 's'} moved up`,
     });
     return {
-      success: ok,
-      message: `Rippled ${id} (-${duration}μs across ${shifted} sibling${shifted === 1 ? '' : 's'})`,
+      success: out.ok,
+      message: out.ok ? `Rippled ${id} (-${duration}μs)` : out.error,
     };
   },
 });

@@ -8,7 +8,7 @@ import { makeHandlers } from '@/mocks/handlers';
 import { server } from '@/mocks/server';
 import { useUiStore } from '@/stores/ui';
 import { getUndoOffers } from 'undo-toast';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 beforeAll(() => {
   registerAllCommands();
@@ -63,7 +63,11 @@ const A = '11111111-1111-4111-8111-111111111111';
 const B = '22222222-2222-4222-8222-222222222222';
 const C = '33333333-3333-4333-8333-333333333333';
 const seed = () => ({
-  annotations: [ann(A, 'words', 0, 500_000, 'a'), ann(B, 'words', 600_000, 1_000_000, 'b'), ann(C, 'phonemes', 700_000, 900_000, 'c')],
+  annotations: [
+    ann(A, 'words', 0, 500_000, 'a'),
+    ann(B, 'words', 600_000, 1_000_000, 'b'),
+    ann(C, 'phonemes', 700_000, 900_000, 'c'),
+  ],
   tiers: [tier('words'), tier('phonemes')],
 });
 
@@ -82,7 +86,9 @@ describe('selection actions', () => {
   it('delete removes every picked annotation, and one Undo re-creates them with their ids', async () => {
     server.use(...makeHandlers(seed()));
     useUiStore.getState().setPicked([A, C]);
-    expect((await registry.execute('lacing.selection.delete', undefined, { source: 'test' })).success).toBe(true);
+    expect(
+      (await registry.execute('lacing.selection.delete', undefined, { source: 'test' })).success,
+    ).toBe(true);
     expect((await list()).map((x) => x.id)).toEqual([B]);
     expect(useUiStore.getState().picked).toEqual([]);
     expect(getUndoOffers().current()?.message).toBe('2 annotations deleted');
@@ -101,15 +107,59 @@ describe('selection actions', () => {
     expect((await byId(C))?.tier).toBe('phonemes');
   });
 
-  it('nudge moves the selection together, never before 0, and Undo restores the intervals', async () => {
+  it('a delete that fails part-way still offers Undo for what it did', async () => {
+    server.use(...makeHandlers(seed()));
+    useUiStore.getState().setPicked([A, C]);
+    // C vanishes between the read and the delete (another client): A is deleted, then C's delete fails.
+    const { annotationsProvider } = await import('@/store/factories');
+    const real = annotationsProvider.delete.bind(annotationsProvider);
+    const spy = vi.spyOn(annotationsProvider, 'delete').mockImplementation(async (id) => {
+      if (id === C) throw new Error('404 not found');
+      return real(id);
+    });
+    const result = await registry.execute('lacing.selection.delete', undefined, { source: 'test' });
+    spy.mockRestore();
+    expect(result.success).toBe(false);
+    expect(await byId(A)).toBeUndefined();
+    expect(getUndoOffers().current()?.message).toMatch(/^1 annotation deleted \(stopped part-way/);
+    expect(await getUndoOffers().undo()).toBe(true);
+    expect(await byId(A)).toBeDefined();
+  });
+
+  it('an Undo replaced by a newer toast is still reachable from the history', async () => {
     server.use(...makeHandlers(seed()));
     useUiStore.getState().setPicked([A, B]);
-    await registry.execute('lacing.selection.nudge', { ms: 100 }, { source: 'test' });
-    expect((await byId(B))?.reference.interval?.start.v).toBe((700_000 / 1_000_000) * 24000);
-    await getUndoOffers().undo();
-    expect((await byId(B))?.reference.interval?.start.v).toBe((600_000 / 1_000_000) * 24000);
-    const earlier = await registry.execute('lacing.selection.nudge', { ms: -100 }, { source: 'test' });
-    expect(earlier.success).toBe(false); // A starts at 0
+    await registry.execute('lacing.selection.delete', undefined, { source: 'test' });
+    useUiStore.getState().setPicked([C]);
+    await registry.execute('lacing.selection.moveToTier', { tier: 'words' }, { source: 'test' }); // replaces the toast
+    await registry.execute('lacing.history.undo', undefined, { source: 'test' }); // the move
+    await registry.execute('lacing.history.undo', undefined, { source: 'test' }); // the delete
+    expect((await list()).map((x) => x.id).sort()).toEqual([A, B, C].sort());
+    expect((await byId(C))?.tier).toBe('phonemes');
+  });
+
+  it('re-creating is skipped for an annotation already back (Try again after a half-done Undo)', async () => {
+    server.use(...makeHandlers(seed()));
+    useUiStore.getState().setPicked([A]);
+    await registry.execute('lacing.selection.delete', undefined, { source: 'test' });
+    await fetch('/api/annotations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(seed().annotations[0]),
+    });
+    expect(await getUndoOffers().undo()).toBe(true);
+    expect((await list()).filter((x) => x.id === A)).toHaveLength(1);
+  });
+
+  it('Esc clears the multi-selection too, and Delete acts on the picked ones', async () => {
+    server.use(...makeHandlers(seed()));
+    useUiStore.getState().setPicked([A, C]);
+    useUiStore.getState().setSelection({ kind: 'annotation', id: B });
+    await registry.execute('lacing.timeline.lift', { id: B }, { source: 'test' });
+    expect((await list()).map((x) => x.id)).toEqual([B]);
+    useUiStore.getState().setPicked([B]);
+    await registry.execute('lacing.selection.clear', undefined, { source: 'test' });
+    expect(useUiStore.getState().picked).toEqual([]);
   });
 });
 
@@ -117,7 +167,9 @@ describe('single deletes are undoable', () => {
   it('ripple delete: Undo re-creates it and moves the later siblings back', async () => {
     server.use(...makeHandlers(seed()));
     useUiStore.getState().setSelection({ kind: 'annotation', id: A });
-    expect((await registry.execute('lacing.timeline.ripple', { id: A }, { source: 'test' })).success).toBe(true);
+    expect(
+      (await registry.execute('lacing.timeline.ripple', { id: A }, { source: 'test' })).success,
+    ).toBe(true);
     expect(await byId(A)).toBeUndefined();
     expect((await byId(B))?.reference.interval?.start.v).toBe((100_000 / 1_000_000) * 24000);
     expect(await getUndoOffers().undo()).toBe(true);
@@ -128,12 +180,17 @@ describe('single deletes are undoable', () => {
   it('lift and tier delete offer Undo instead of deleting for good', async () => {
     server.use(...makeHandlers(seed()));
     useUiStore.getState().setSelection({ kind: 'annotation', id: B });
-    expect((await registry.execute('lacing.timeline.lift', { id: B }, { source: 'test' })).success).toBe(true);
+    expect(
+      (await registry.execute('lacing.timeline.lift', { id: B }, { source: 'test' })).success,
+    ).toBe(true);
     expect(await byId(B)).toBeUndefined();
     await getUndoOffers().undo();
     expect(await byId(B)).toBeDefined();
     useUiStore.getState().setSelection({ kind: 'tier', name: 'phonemes' });
-    expect((await registry.execute('lacing.tiers.delete', { name: 'phonemes' }, { source: 'test' })).success).toBe(true);
+    expect(
+      (await registry.execute('lacing.tiers.delete', { name: 'phonemes' }, { source: 'test' }))
+        .success,
+    ).toBe(true);
     expect(getUndoOffers().current()?.message).toBe('Tier phonemes deleted');
     await getUndoOffers().undo();
     const tiers = (await (await fetch('/api/tiers')).json()) as Tier[];

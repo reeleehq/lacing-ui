@@ -33,6 +33,7 @@ export const clearSelectionCmd = defineCommand({
   keybinding: { key: 'Escape' },
   execute: async () => {
     useUiStore.getState().setSelection({ kind: 'none' });
+    useUiStore.getState().clearPicked();
     return { success: true };
   },
 });

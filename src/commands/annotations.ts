@@ -6,23 +6,18 @@
 
 import type { Annotation } from '@/domain/envelope';
 import { annotationSchema } from '@/domain/envelope';
-import { recreate, undoable } from '@/lib/undo';
+import { deleteAnnotations } from '@/lib/undo';
 import { annotationsProvider } from '@/store/factories';
 import { defineCommand } from 'command-wrapex';
 import { z } from 'zod';
 
 /** Delete one annotation with one Undo that re-creates it exactly. */
-export async function deleteWithUndo(id: string, message: string): Promise<boolean> {
+export async function deleteWithUndo(
+  id: string,
+  message: string,
+): Promise<{ ok: boolean; error?: string }> {
   const record = await annotationsProvider.getOne(id);
-  return undoable({
-    context: 'remove-item',
-    run: async () => {
-      await annotationsProvider.delete(id);
-      return [record];
-    },
-    undo: (done) => recreate(done),
-    message: () => message,
-  });
+  return deleteAnnotations([record], () => message);
 }
 
 export const createAnnotationCmd = defineCommand({
@@ -63,8 +58,8 @@ export const deleteAnnotationCmd = defineCommand({
   schema: z.object({ id: z.guid() }),
   when: 'selection.kind === "annotation"',
   execute: async ({ id }) => {
-    const ok = await deleteWithUndo(id, 'Annotation deleted');
-    return { success: ok, message: ok ? `Deleted ${id}` : undefined };
+    const out = await deleteWithUndo(id, 'Annotation deleted');
+    return { success: out.ok, message: out.ok ? `Deleted ${id}` : out.error };
   },
 });
 
@@ -91,7 +86,8 @@ export const rejectAiSuggestionCmd = defineCommand({
   keybinding: { key: 'X', meta: true, shift: true },
   when: 'selection.kind === "annotation"',
   execute: async ({ id }) => {
-    return { success: await deleteWithUndo(id, 'AI suggestion rejected') };
+    const out = await deleteWithUndo(id, 'AI suggestion rejected');
+    return { success: out.ok, message: out.error };
   },
 });
 

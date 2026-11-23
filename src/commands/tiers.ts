@@ -43,18 +43,23 @@ export const deleteTierCmd = defineCommand({
   schema: z.object({ name: z.string() }),
   when: 'selection.kind === "tier"',
   execute: async ({ name }) => {
-    // One Undo re-creates the tier as it was (its annotations were never touched).
+    // One Undo re-creates the tier as it was (its annotations were never touched). The server
+    // has no DELETE /tiers/{name} yet, so today this answers its refusal and offers no Undo.
     const tier = await tiersProvider.getOne(name);
-    const ok = await undoable({
+    const out = await undoable<{ tier?: typeof tier }>({
       context: 'delete-work',
-      run: async () => {
+      start: () => ({}),
+      run: async (done) => {
         await tiersProvider.delete(name);
-        return tier;
+        done.tier = tier;
       },
-      undo: (t) => tiersProvider.create(t),
+      isEmpty: (done) => !done.tier,
+      undo: async (done) => {
+        if (done.tier) await tiersProvider.create(done.tier);
+      },
       message: () => `Tier ${name} deleted`,
     });
-    return { success: ok, message: ok ? `Deleted tier ${name}` : undefined };
+    return { success: out.ok, message: out.ok ? `Deleted tier ${name}` : out.error };
   },
 });
 
