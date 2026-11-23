@@ -1,16 +1,18 @@
 // NLE timeline edit commands: blade (split at playhead), lift (delete keep gap),
 // ripple (delete and close gap on the same tier).
 //
-// These mutate annotations through the existing annotationsProvider so undo
-// later flows through the same (forward, inverse) command-pair pattern as the
-// rest. For Phase 3.6 we only ship the forward direction; Phase 4 adds undo.
+// These mutate annotations through the existing annotationsProvider. Lift and
+// ripple offer one Undo (src/lib/undo.ts): the deleted annotation is re-created
+// with its id, and a ripple's shifted siblings get their intervals back.
 
 import type { Annotation } from '@/domain/envelope';
 import { fromMicros, intervalToMicros } from '@/domain/time';
+import { recreate, restoreFields, undoable } from '@/lib/undo';
 import { annotationsProvider } from '@/store/factories';
 import { useTransportStore } from '@/stores/transport';
 import { defineCommand } from 'command-wrapex';
 import { z } from 'zod';
+import { deleteWithUndo } from './annotations';
 
 // --- helpers --------------------------------------------------------------
 
@@ -83,8 +85,8 @@ export const liftCmd = defineCommand({
   keybinding: { key: 'Delete' },
   when: 'selection.kind === "annotation"',
   execute: async ({ id }) => {
-    await annotationsProvider.delete(id);
-    return { success: true, message: `Lifted ${id}` };
+    const ok = await deleteWithUndo(id, 'Annotation lifted');
+    return { success: ok, message: ok ? `Lifted ${id}` : undefined };
   },
 });
 
@@ -106,28 +108,43 @@ export const rippleCmd = defineCommand({
     const { start, end } = intervalToMicros(interval);
     const duration = end - start;
 
-    // Delete first, then shift later siblings on the same tier.
-    await annotationsProvider.delete(id);
-
-    const all = await annotationsProvider.getList({});
-    const toShift = all.data.filter((a) => {
-      if (a.id === id) return false;
-      if (a.tier !== ann.tier) return false;
-      const ai = a.reference.interval;
-      if (!ai) return false;
-      return intervalToMicros(ai).start >= end;
+    // Delete first, then shift later siblings on the same tier. One Undo re-creates the
+    // annotation and puts every shifted sibling back where it was.
+    let shifted = 0;
+    const ok = await undoable({
+      context: 'remove-item',
+      run: async () => {
+        await annotationsProvider.delete(id);
+        const all = await annotationsProvider.getList({});
+        const toShift = all.data.filter((a) => {
+          if (a.id === id) return false;
+          if (a.tier !== ann.tier) return false;
+          const ai = a.reference.interval;
+          if (!ai) return false;
+          return intervalToMicros(ai).start >= end;
+        });
+        const before: { id: string; patch: Partial<Annotation> }[] = [];
+        for (const a of toShift) {
+          const ai = a.reference.interval;
+          if (!ai) continue;
+          const { start: s, end: e } = intervalToMicros(ai);
+          const newRef = withInterval(a, s - duration, e - duration);
+          await annotationsProvider.update(a.id, { reference: newRef });
+          before.push({ id: a.id, patch: { reference: a.reference } });
+        }
+        shifted = before.length;
+        return { deleted: [ann], before };
+      },
+      undo: async ({ deleted, before }) => {
+        await restoreFields(before);
+        await recreate(deleted);
+      },
+      message: ({ before }) =>
+        `Ripple delete: ${before.length} later annotation${before.length === 1 ? '' : 's'} moved up`,
     });
-
-    for (const a of toShift) {
-      const ai = a.reference.interval;
-      if (!ai) continue;
-      const { start: s, end: e } = intervalToMicros(ai);
-      const newRef = withInterval(a, s - duration, e - duration);
-      await annotationsProvider.update(a.id, { reference: newRef });
-    }
     return {
-      success: true,
-      message: `Rippled ${id} (-${duration}μs across ${toShift.length} sibling${toShift.length === 1 ? '' : 's'})`,
+      success: ok,
+      message: `Rippled ${id} (-${duration}μs across ${shifted} sibling${shifted === 1 ? '' : 's'})`,
     };
   },
 });

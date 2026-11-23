@@ -14,6 +14,7 @@ import type { CommandContext, CommandRegistry, WhenClauseEvaluator } from 'comma
 interface AppWhenContext {
   selection: 'none' | 'annotation' | 'tier';
   hasAnnotations: boolean;
+  picked: number;
 }
 
 function buildWhenContext(): AppWhenContext {
@@ -21,6 +22,7 @@ function buildWhenContext(): AppWhenContext {
   return {
     selection: ui.selection.kind,
     hasAnnotations: ui.lastListSize > 0,
+    picked: ui.picked.length,
   };
 }
 
@@ -37,6 +39,8 @@ const evaluateWhen: WhenClauseEvaluator = (clause: string) => {
       return ctx.selection === 'tier';
     case 'selection.kind !== "none"':
       return ctx.selection !== 'none';
+    case 'picked.length > 0':
+      return ctx.picked > 0;
     default:
       // Unknown clauses default to TRUE so commands aren't accidentally hidden
       // — surface a console warning so we catch typos in dev.

@@ -1,14 +1,29 @@
 // Commands for annotation CRUD + AI-assist actions.
 //
 // Every mutation goes through the active DataProvider; the result drives the
-// list refresh. Future work (Phase 4): emit (forward, inverse) pairs into an
-// undoStore so Mod+Z can undo a domain mutation through the same registry.
+// list refresh. A delete acts at once and offers one Undo that re-creates the
+// annotation exactly (src/lib/undo.ts), so it needs no confirmation.
 
 import type { Annotation } from '@/domain/envelope';
 import { annotationSchema } from '@/domain/envelope';
+import { recreate, undoable } from '@/lib/undo';
 import { annotationsProvider } from '@/store/factories';
 import { defineCommand } from 'command-wrapex';
 import { z } from 'zod';
+
+/** Delete one annotation with one Undo that re-creates it exactly. */
+export async function deleteWithUndo(id: string, message: string): Promise<boolean> {
+  const record = await annotationsProvider.getOne(id);
+  return undoable({
+    context: 'remove-item',
+    run: async () => {
+      await annotationsProvider.delete(id);
+      return [record];
+    },
+    undo: (done) => recreate(done),
+    message: () => message,
+  });
+}
 
 export const createAnnotationCmd = defineCommand({
   id: 'lacing.annotations.create',
@@ -47,10 +62,9 @@ export const deleteAnnotationCmd = defineCommand({
   description: 'Remove an annotation by id.',
   schema: z.object({ id: z.guid() }),
   when: 'selection.kind === "annotation"',
-  requiresConfirmation: true,
   execute: async ({ id }) => {
-    await annotationsProvider.delete(id);
-    return { success: true, message: `Deleted ${id}` };
+    const ok = await deleteWithUndo(id, 'Annotation deleted');
+    return { success: ok, message: ok ? `Deleted ${id}` : undefined };
   },
 });
 
@@ -77,8 +91,7 @@ export const rejectAiSuggestionCmd = defineCommand({
   keybinding: { key: 'X', meta: true, shift: true },
   when: 'selection.kind === "annotation"',
   execute: async ({ id }) => {
-    await annotationsProvider.delete(id);
-    return { success: true };
+    return { success: await deleteWithUndo(id, 'AI suggestion rejected') };
   },
 });
 
