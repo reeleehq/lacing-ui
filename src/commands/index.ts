@@ -2,6 +2,7 @@
 // module once at startup.
 
 import { annotationCommands } from './annotations';
+import { bulkCommands } from './bulk';
 import { ioCommands } from './io';
 import { registry } from './registry';
 import { selectionCommands } from './selection';
@@ -18,6 +19,7 @@ export function registerAllCommands(): void {
     ...tierCommands,
     ...transportCommands,
     ...selectionCommands,
+    ...bulkCommands,
     ...timelineCommands,
     ...ioCommands,
   ]);

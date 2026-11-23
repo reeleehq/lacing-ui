@@ -14,10 +14,13 @@ import { FileBar } from '@/ui/file-bar';
 import { Inspector } from '@/ui/inspector';
 import { CommandPalette } from '@/ui/palette';
 import { ProgramMonitor } from '@/ui/program-monitor';
+import { SelectionBar } from '@/ui/selection-bar';
 import { ThemePicker } from '@/ui/theme-picker';
 import { TierList } from '@/ui/tier-list';
 import { Timeline } from '@/ui/timeline';
 import { Waveform } from '@/ui/waveform';
+import { UndoToast } from 'undo-toast/react';
+import 'undo-toast/styles.css';
 
 registerAllCommands();
 
@@ -55,6 +58,9 @@ function App() {
   const setLastListSize = useUiStore((s) => s.setLastListSize);
   const togglePalette = useUiStore((s) => s.togglePalette);
   const selection = useUiStore((s) => s.selection);
+  const picked = useUiStore((s) => s.picked);
+  const pick = useUiStore((s) => s.pick);
+  const dataVersion = useUiStore((s) => s.dataVersion);
 
   useKeyboardShortcuts();
 
@@ -81,9 +87,11 @@ function App() {
     }
   }, [setLastListSize]);
 
+  // Read again after any mutation a command made (dataVersion), not only after App's own buttons.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dataVersion is the trigger.
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, dataVersion]);
 
   async function handleCreate() {
     try {
@@ -120,6 +128,7 @@ function App() {
         <Waveform url={DEMO_AUDIO_URL} annotations={items} audioElement={audioEl} />
       </section>
 
+      <SelectionBar tiers={tiers} />
       <Timeline annotations={items} tiers={tiers} remote={remote} />
 
       <div className="grid grid-cols-1 lg:grid-cols-[200px_1fr_360px] gap-4">
@@ -133,19 +142,27 @@ function App() {
               <li className="text-muted-foreground">none yet — create one below</li>
             ) : (
               items.map((a) => {
-                const selected = selection.kind === 'annotation' && selection.id === a.id;
+                const selected =
+                  (selection.kind === 'annotation' && selection.id === a.id) ||
+                  picked.includes(a.id);
                 return (
                   <li key={a.id}>
                     <button
                       type="button"
                       className={`w-full text-left px-2 py-1 rounded hover:bg-accent hover:text-accent-foreground ${selected ? 'bg-accent text-accent-foreground' : ''}`}
-                      onClick={() =>
+                      aria-pressed={picked.length ? picked.includes(a.id) : undefined}
+                      onClick={(e) => {
+                        // Cmd/Ctrl-click toggles it in the multi-selection; Shift-click picks the range.
+                        if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                          pick(a.id, e.shiftKey ? { order: items.map((x) => x.id) } : undefined);
+                          return;
+                        }
                         void registry.execute(
                           'lacing.selection.annotation',
                           { id: a.id },
                           { source: 'annotation-list' },
-                        )
-                      }
+                        );
+                      }}
                     >
                       <span className="font-mono">{a.tier}</span> · {String(a.body.text)}
                     </button>
@@ -169,7 +186,9 @@ function App() {
           </div>
           <p className="text-xs text-muted-foreground">
             Press <kbd className="rounded border px-1">⌘K</kbd> for the command palette. Click an
-            annotation to inspect; Esc clears selection. Space plays/pauses; J/K/L scrub.
+            annotation to inspect; Esc clears selection. ⌘/Ctrl-click or Shift-click to select
+            several, then act on them in the bar above the timeline (one Undo each). Space
+            plays/pauses; J/K/L scrub.
           </p>
         </section>
 
@@ -177,6 +196,7 @@ function App() {
       </div>
 
       <CommandPalette />
+      <UndoToast />
     </main>
   );
 }

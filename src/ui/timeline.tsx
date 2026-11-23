@@ -51,9 +51,14 @@ interface AnnotationItemProps {
   annotation: Annotation;
 }
 
-function AnnotationItem({ item, annotation }: AnnotationItemProps) {
+function AnnotationItem({
+  item,
+  annotation,
+  order,
+}: AnnotationItemProps & { order: readonly string[] }) {
   const selection = useUiStore((s) => s.selection);
   const selected = selection.kind === 'annotation' && selection.id === item.id;
+  const picked = useUiStore((s) => s.picked.includes(item.id));
   const { setNodeRef, attributes, listeners, itemStyle, itemContentStyle } = useItem({
     id: item.id,
     span: item.span,
@@ -68,11 +73,16 @@ function AnnotationItem({ item, annotation }: AnnotationItemProps) {
       // biome-ignore lint/a11y/useSemanticElements: ARIA grid pattern requires role="gridcell".
       role="gridcell"
       tabIndex={selected ? 0 : -1}
-      aria-selected={selected}
+      aria-selected={selected || picked}
       aria-label={`${annotation.tier}: ${String(annotation.body.text ?? annotation.tier)}`}
       data-annotation-id={annotation.id}
       onClick={(e) => {
         e.stopPropagation();
+        // Cmd/Ctrl-click adds or removes it from the multi-selection; Shift-click picks the range.
+        if (e.metaKey || e.ctrlKey || e.shiftKey) {
+          useUiStore.getState().pick(annotation.id, e.shiftKey ? { order } : undefined);
+          return;
+        }
         void registry.execute(
           'lacing.selection.annotation',
           { id: annotation.id },
@@ -85,6 +95,7 @@ function AnnotationItem({ item, annotation }: AnnotationItemProps) {
         selected
           ? 'bg-primary text-primary-foreground border-primary'
           : 'bg-accent text-accent-foreground border-border',
+        picked && 'ring-2 ring-primary ring-offset-1',
       )}
     >
       <div style={itemContentStyle} className="px-2 py-1 truncate">
@@ -100,9 +111,11 @@ interface TimelineRowProps {
   tier: Tier;
   items: ItemDefinition[];
   annotationsById: Map<string, Annotation>;
+  /** Every annotation in time order (a Shift-click range runs over it). */
+  order: readonly string[];
 }
 
-function TimelineRow({ tier, items, annotationsById }: TimelineRowProps) {
+function TimelineRow({ tier, items, annotationsById, order }: TimelineRowProps) {
   const { setNodeRef, rowStyle, rowSidebarStyle, rowWrapperStyle } = useRow({ id: tier.name });
   return (
     // biome-ignore lint/a11y/useFocusableInteractive: rows aren't focused; cells are.
@@ -118,7 +131,7 @@ function TimelineRow({ tier, items, annotationsById }: TimelineRowProps) {
         {items.map((item) => {
           const ann = annotationsById.get(item.id);
           if (!ann) return null;
-          return <AnnotationItem key={item.id} item={item} annotation={ann} />;
+          return <AnnotationItem key={item.id} item={item} annotation={ann} order={order} />;
         })}
       </div>
     </div>
@@ -160,6 +173,17 @@ function TimelineBody({ tiers, items, annotationsById, remote }: TimelineBodyPro
   // clientHeight is unreliable).
   const scrollRef = useRef<HTMLDivElement>(null);
   const grouped = useMemo(() => groupItemsToRows(items), [items]);
+  // Time order across tiers (then tier order): what a Shift-click range runs over.
+  const order = useMemo(() => {
+    const tierIndex = new Map(tiers.map((t, i) => [t.name, i]));
+    return [...items]
+      .sort(
+        (a, b) =>
+          a.span.start - b.span.start ||
+          (tierIndex.get(String(a.rowId)) ?? 0) - (tierIndex.get(String(b.rowId)) ?? 0),
+      )
+      .map((i) => String(i.id));
+  }, [items, tiers]);
   const virtualize = tiers.length >= VIRTUALIZE_THRESHOLD;
   const virtualizer = useVirtualizer({
     count: virtualize ? tiers.length : 0,
@@ -221,6 +245,7 @@ function TimelineBody({ tiers, items, annotationsById, remote }: TimelineBodyPro
                   tier={tier}
                   items={grouped[tier.name] ?? []}
                   annotationsById={annotationsById}
+                  order={order}
                 />
               </div>
             );
@@ -233,6 +258,7 @@ function TimelineBody({ tiers, items, annotationsById, remote }: TimelineBodyPro
             tier={t}
             items={grouped[t.name] ?? []}
             annotationsById={annotationsById}
+            order={order}
           />
         ))
       )}

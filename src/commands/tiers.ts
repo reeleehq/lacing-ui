@@ -2,6 +2,7 @@
 // tier name as a field, so renaming a tier is a server-side cascade (Phase 4).
 
 import { tierSchema } from '@/domain/collections';
+import { undoable } from '@/lib/undo';
 import { tiersProvider } from '@/store/factories';
 import { defineCommand } from 'command-wrapex';
 import { z } from 'zod';
@@ -41,10 +42,24 @@ export const deleteTierCmd = defineCommand({
   description: 'Remove a tier. Annotations on this tier remain but are orphaned.',
   schema: z.object({ name: z.string() }),
   when: 'selection.kind === "tier"',
-  requiresConfirmation: true,
   execute: async ({ name }) => {
-    await tiersProvider.delete(name);
-    return { success: true, message: `Deleted tier ${name}` };
+    // One Undo re-creates the tier as it was (its annotations were never touched). The server
+    // has no DELETE /tiers/{name} yet, so today this answers its refusal and offers no Undo.
+    const tier = await tiersProvider.getOne(name);
+    const out = await undoable<{ tier?: typeof tier }>({
+      context: 'delete-work',
+      start: () => ({}),
+      run: async (done) => {
+        await tiersProvider.delete(name);
+        done.tier = tier;
+      },
+      isEmpty: (done) => !done.tier,
+      undo: async (done) => {
+        if (done.tier) await tiersProvider.create(done.tier);
+      },
+      message: () => `Tier ${name} deleted`,
+    });
+    return { success: out.ok, message: out.ok ? `Deleted tier ${name}` : out.error };
   },
 });
 
