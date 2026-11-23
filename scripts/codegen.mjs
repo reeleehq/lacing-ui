@@ -14,7 +14,8 @@
 // at a fresh checkout of the lacing repo.
 
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,8 +53,18 @@ mkdirSync(OUT_DIR, { recursive: true });
 
 const exportedNames = [];
 
+// json-schema-to-zod reads neither `$ref` nor 2020-12 `prefixItems`, both of
+// which Pydantic emits: a nested model became `z.any()` and a fixed-length
+// tuple (`chars: [start, end]`) `z.array(z.any())` (lacing#179). Each schema is
+// normalised first (see `normalize`), into a temp dir.
+const NORMALIZED_DIR = mkdtempSync(join(tmpdir(), 'lacing-ui-codegen-'));
+
 for (const [uri, meta] of Object.entries(index)) {
-  const inputPath = join(SCHEMA_DIR, meta.path);
+  const inputPath = join(NORMALIZED_DIR, `${meta.name}__v${meta.version}.json`);
+  writeFileSync(
+    inputPath,
+    JSON.stringify(normalize(JSON.parse(readFileSync(join(SCHEMA_DIR, meta.path), 'utf8')))),
+  );
   const safeName = `${meta.name.replace(/-/g, '_')}__v${meta.version}`;
   const outputPath = join(OUT_DIR, `${safeName}.ts`);
 
@@ -87,7 +98,42 @@ for (const e of exportedNames) {
 }
 writeFileSync(join(OUT_DIR, 'index.ts'), `${lines.join('\n')}\n`);
 
+rmSync(NORMALIZED_DIR, { recursive: true });
 console.log(`codegen: wrote ${exportedNames.length} schema file(s) to ${OUT_DIR}`);
+
+/**
+ * A JSON Schema json-schema-to-zod can read in full: local `$defs` /
+ * `definitions` references inlined (a recursive one is left as it is, and
+ * becomes `z.any()`), and `prefixItems` turned into the tuple form
+ * (`items: [...]`, which it emits as `z.tuple`).
+ */
+function normalize(schema) {
+  const defs = { ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) };
+  const walk = (node, inlining) => {
+    if (Array.isArray(node)) return node.map((n) => walk(n, inlining));
+    if (node === null || typeof node !== 'object') return node;
+    if (typeof node.$ref === 'string') {
+      const name = node.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)?.[1];
+      if (name && defs[name] && !inlining.includes(name)) {
+        const { $ref, ...rest } = node;
+        return walk({ ...defs[name], ...rest }, [...inlining, name]);
+      }
+      return node;
+    }
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key !== '$defs' && key !== 'definitions') out[key] = walk(value, inlining);
+    }
+    if (Array.isArray(out.prefixItems)) {
+      out.items = out.prefixItems;
+      delete out.prefixItems;
+      delete out.minItems;
+      delete out.maxItems;
+    }
+    return out;
+  };
+  return walk(schema, []);
+}
 
 function camelize(kebab) {
   return kebab
